@@ -1,0 +1,36 @@
+{
+  "name": "@rahulmutt/pi-ralph",
+  "version": "0.1.0",
+  "description": "Pi extension that adds the /ralph command — a Ralph Wiggum loop that runs a prompt file over multiple fresh sessions",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "ralph-loop"
+  ],
+  "license": "Apache-2.0",
+  "author": "Rahul Muttineni",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rahulmutt/pi-ralph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rahulmutt/pi-ralph/issues"
+  },
+  "homepage": "https://github.com/rahulmutt/pi-ralph#readme",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
