@@ -55,9 +55,33 @@ Everything lives here. The default export is a function that receives a `pi: Ext
 
 ### Coordination pattern
 
-`ralphAgentDoneResolve` is a module-level variable (a `Promise` resolver). The `agent_end` listener
-reads it, clears it, and calls it with the result. It must be set **before** `pi.sendUserMessage` is
-called to avoid a race where `agent_end` fires before the promise is created.
+In pi ≥ 0.65.0, every `ctx.newSession()` call re-runs `createAgentSessionServices()`, which creates
+a fresh `DefaultResourceLoader` and loads the extension module again via jiti with `moduleCache: false`.
+Each fresh load calls `ralph(pi)` with a new API object bound to the new session's runner — so a plain
+`let` inside the factory function would give each session its own isolated closure variable.
+
+To share state across sessions, the extension uses **`Symbol.for("@rahulmutt/pi-ralph.state")`** as a
+key on `globalThis`.  `Symbol.for` returns the same Symbol from any module instance in the same process,
+so `getRalphState()` always returns the single shared `RalphState` object regardless of how many times
+the module was freshly loaded.
+
+`RalphState` holds two fields:
+
+| Field | Purpose |
+|---|---|
+| `resolve` | The resolver for the current `agentDone` Promise. Set before `ctx.newSession()`; cleared by the `agent_end` handler. |
+| `pending` | The prompt to send. Set before `ctx.newSession()`; consumed (and cleared to `null`) by the `session_start` handler. |
+
+**Sequence within each iteration:**
+1. Store `state.resolve` (the `agentDone` resolver) in global state.
+2. Store `state.pending = trimmedPrompt` in global state.
+3. `await ctx.newSession(...)` — this fires `session_start` on the NEW session's runner:
+   - The `session_start` handler reads `state.pending`, clears it, and calls `pi.sendUserMessage(prompt)` using *that* runner's `pi` (already bound to the new session).
+4. The agent runs; when done, `agent_end` fires on the new session's runner.
+5. The `agent_end` handler reads `state.resolve`, clears it, and resolves `agentDone` with the result.
+
+The "set resolve before send" invariant is maintained because `state.resolve` (step 1) is always written
+before `pi.sendUserMessage` is called (step 3, inside `ctx.newSession()`).
 
 ### Output files (written under `<cwd>/.ralph/`)
 
@@ -111,10 +135,11 @@ Update `canReadPath`, `normalizeFsPath`, and/or `isWithinPath`.
 ## Invariants to preserve
 
 - `pi.sendUserMessage` must **not** be awaited — it returns `void` and fires-and-forgets.
-- `ralphAgentDoneResolve` must be set **before** `pi.sendUserMessage` is called.
+- `state.resolve` must be set **before** `state.pending` (which triggers `pi.sendUserMessage` inside `ctx.newSession()`).
 - Every iteration must branch from the **original** session, not from the session created by the previous iteration. The `originalSession` variable is captured once before the loop.
 - Path traversal outside the allowed roots must be rejected before any file I/O.
 - Backtick fences inside assistant messages must be escaped (`escapeCodeFence`) before writing to `.md` files.
+- `getRalphState()` must always be used to access coordination state — never cache the returned object across `await` boundaries that span a `ctx.newSession()` call.
 
 ---
 

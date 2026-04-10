@@ -1,4 +1,4 @@
-import type { AgentEndEvent, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentEndEvent, ExtensionAPI, SessionStartEvent } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -112,6 +112,50 @@ function extractTextContent(content: unknown): string {
 		.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Process-global coordination state
+//
+// In pi ≥ 0.65.0, every ctx.newSession() call recreates the DefaultResourceLoader
+// and therefore produces a brand-new ExtensionRunner loaded via jiti with
+// moduleCache: false.  Each fresh load calls ralph(pi) again, giving each
+// session its own closure — so a plain `let` inside ralph() is NOT shared
+// across sessions.
+//
+// We use Symbol.for() to key a single RalphState object on globalThis.  Symbols
+// from Symbol.for() are shared across all module instances in the same process,
+// so the state is visible to every ralph(pi) invocation regardless of how many
+// times the module is freshly loaded.
+//
+// When the tests use a shared DefaultResourceLoader the same ExtensionRunner
+// (and therefore the same ralph(pi) closure) is reused for all sessions, so
+// the Symbol.for key just points to the same object — no behavioural change.
+// ---------------------------------------------------------------------------
+
+const RALPH_STATE_KEY = Symbol.for("@rahulmutt/pi-ralph.state");
+
+interface IterationResult {
+	lastMessage: string;
+	messages: AgentEndEvent["messages"];
+}
+
+interface RalphState {
+	/** Resolve for the current iteration's agentDone promise, or null when idle. */
+	resolve: ((result: IterationResult) => void) | null;
+	/**
+	 * Prompt to send once the new session's session_start fires.
+	 * Set before ctx.newSession(); consumed (and cleared) by the session_start handler.
+	 */
+	pending: string | null;
+}
+
+function getRalphState(): RalphState {
+	const g = globalThis as Record<symbol, unknown>;
+	if (!g[RALPH_STATE_KEY]) {
+		g[RALPH_STATE_KEY] = { resolve: null, pending: null } satisfies RalphState;
+	}
+	return g[RALPH_STATE_KEY] as RalphState;
+}
+
 function escapeCodeFence(text: string): string {
 	return text.replace(/```/g, "``\\`");
 }
@@ -190,20 +234,43 @@ async function writeRalphStateFile(
 }
 
 export default function ralph(pi: ExtensionAPI) {
-	/** Result delivered from agent_end to the waiting iteration handler. */
-	interface IterationResult {
-		lastMessage: string;
-		/** Full conversation transcript for this agent run, in message order. */
-		messages: AgentEndEvent["messages"];
-	}
+	// -----------------------------------------------------------------------
+	// session_start — send the pending prompt into the newly created session.
+	//
+	// In pi ≥ 0.65.0, ctx.newSession() recreates the DefaultResourceLoader and
+	// produces a fresh ExtensionRunner (runner2).  That runner's `pi` object is
+	// already bound to the new session's sendUserMessage by the time
+	// session_start fires (inside session2.bindExtensions, which is called after
+	// _bindExtensionCore has updated runtime.sendUserMessage).
+	//
+	// We read the pending prompt from the process-global RalphState and call
+	// pi.sendUserMessage here so the message reaches the correct, live session.
+	//
+	// Invariant: state.resolve is set before state.pending, which is set before
+	// ctx.newSession() is awaited — so the resolve is always in place before
+	// sendUserMessage is called here.
+	// -----------------------------------------------------------------------
+	pi.on("session_start", (event: SessionStartEvent, _ctx) => {
+		if (event.reason !== "new") return;
+		const state = getRalphState();
+		if (!state.pending) return;
+		const prompt = state.pending;
+		state.pending = null; // consume immediately to prevent double-send
+		// pi here is the NEW session's API — sendUserMessage reaches the
+		// correct agent regardless of which runner calls this handler.
+		pi.sendUserMessage(prompt);
+	});
 
-	// Used by /ralph to coordinate with agent_end events.
-	// Set to a resolver just before pi.sendUserMessage is called each iteration;
-	// cleared and resolved once agent_end fires.
-	let ralphAgentDoneResolve: ((result: IterationResult) => void) | null = null;
-
+	// -----------------------------------------------------------------------
+	// agent_end — resolve the current iteration's agentDone promise.
+	//
+	// In real interactive mode this fires on runner2 (new session's runner).
+	// In the shared-resource-loader test setup it fires on the same runner as
+	// the command handler.  Either way we resolve via the global state.
+	// -----------------------------------------------------------------------
 	pi.on("agent_end", async (event, _ctx) => {
-		if (!ralphAgentDoneResolve) return;
+		const state = getRalphState();
+		if (!state.resolve) return;
 
 		// Extract the last assistant text from this agent run's messages.
 		let lastMsg = "";
@@ -219,8 +286,8 @@ export default function ralph(pi: ExtensionAPI) {
 			}
 		}
 
-		const resolve = ralphAgentDoneResolve;
-		ralphAgentDoneResolve = null;
+		const resolve = state.resolve;
+		state.resolve = null;
 		resolve({ lastMessage: lastMsg, messages: msgs });
 	});
 
@@ -276,6 +343,20 @@ export default function ralph(pi: ExtensionAPI) {
 				for (let i = 1; i <= parsed.iterations; i++) {
 					ctx.ui.setStatus("ralph", `Ralph Wiggum loop ${i}/${parsed.iterations}: resetting session`);
 
+					// Set up agentDone and store the resolve in global state BEFORE
+					// calling ctx.newSession().  ctx.newSession() fires session_start
+					// on the new session's runner (inside bindExtensions).  That
+					// handler reads state.pending and calls pi.sendUserMessage on the
+					// new runner — which is already bound to the new session's agent.
+					// Storing the resolve first guarantees it is always set before
+					// sendUserMessage is called, even though both happen inside the
+					// same ctx.newSession() await.
+					const state = getRalphState();
+					const agentDone = new Promise<IterationResult>((resolve) => {
+						state.resolve = resolve;
+					});
+					state.pending = trimmedPrompt;
+
 					const newSessionResult = await ctx.newSession(
 						originalSession ? { parentSession: originalSession } : undefined,
 					);
@@ -286,23 +367,17 @@ export default function ralph(pi: ExtensionAPI) {
 
 					ctx.ui.setStatus("ralph", `Ralph Wiggum loop ${i}/${parsed.iterations}: running prompt`);
 
-					// Set up the resolver BEFORE sending the message to avoid any race
-					// where agent_end fires before we've created the Promise.
-					const agentDone = new Promise<string>((resolve) => {
-						ralphAgentDoneResolve = resolve;
-					});
-
-					// pi.sendUserMessage returns void — do NOT await it.
-					// The agent_end listener above resolves agentDone once the run
-					// completes and gives us the last assistant message directly.
-					pi.sendUserMessage(trimmedPrompt);
-
+					// agentDone is resolved by the agent_end handler above.
+					// The message was already sent to the new session inside the
+					// session_start handler that fired during ctx.newSession().
 					const { lastMessage, messages } = await agentDone;
 					await writeRalphStateFile(ctx.cwd, invocationTimestamp, resolvedPromptPath, i, parsed.iterations, lastMessage, messages);
 					ctx.ui.notify(`Ralph iteration ${i}/${parsed.iterations} complete`, "info");
 				}
 			} finally {
-				ralphAgentDoneResolve = null;
+				const state = getRalphState();
+				state.resolve = null;
+				state.pending = null;
 				ctx.ui.setStatus("ralph", "");
 			}
 
