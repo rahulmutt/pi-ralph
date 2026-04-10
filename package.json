@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Pi extension that adds the /ralph command — a Ralph Wiggum loop that runs a prompt file over multiple fresh sessions",
   "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test --test-timeout=30000 tests/e2e.test.ts",
+    "test:verbose": "node --experimental-strip-types --test --test-reporter spec --test-timeout=30000 tests/e2e.test.ts"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -32,5 +36,9 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*"
   }
 }
