@@ -1,6 +1,6 @@
 {
   "name": "@rahulmutt/pi-ralph",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pi extension that adds the /ralph command — a Ralph Wiggum loop that runs a prompt file over multiple fresh sessions",
   "type": "module",
   "scripts": {
