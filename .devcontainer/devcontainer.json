@@ -1,24 +1,15 @@
 {
   "name": "pi-ralph",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  "image": "ghcr.io/rahulmutt/dev:sha-45d631e",
   "workspaceFolder": "/workspace",
-  "remoteUser": "root",
-  "containerEnv": {
-    "MISE_DATA_DIR": "/root/.local/share/mise",
-    "MISE_CACHE_DIR": "/root/.cache/mise",
-    "EDITOR": "nvim",
-    "SHELL": "/bin/bash"
-  },
+  "remoteUser": "dev",
   "mounts": [
-    "source=devpod-home-cache,target=/root/.cache,type=volume",
-    "source=devpod-home-local,target=/root/.local,type=volume",
-    "source=devpod-cargo,target=/root/.cargo,type=volume",
-    "source=devpod-rustup,target=/root/.rustup,type=volume"
+    "source=devpod-v2-home-cache,target=/root/.cache,type=volume",
+    "source=devpod-v2-home-local,target=/root/.local,type=volume",
+    "source=devpod-v2-bun,target=/home/dev/.bun,type=volume",
+    "source=devpod-v2-npm,target=/home/dev/.npm,type=volume"
   ],
-  "postCreateCommand": "bash -lc 'if [ -f mise.toml ]; then mise trust --yes mise.toml || true; mise install; fi; if [ ! -d ~/.config/nvim ]; then git clone https://github.com/LazyVim/starter ~/.config/nvim; fi'",
+  "postCreateCommand": "post-create.sh",
   "customizations": {
     "devpod": {
       "ide": "none"
