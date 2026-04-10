@@ -1,6 +1,6 @@
 {
   "name": "@rahulmutt/pi-ralph",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension that adds the /ralph command — a Ralph Wiggum loop that runs a prompt file over multiple fresh sessions",
   "type": "module",
   "scripts": {
@@ -33,9 +33,6 @@
     "extensions": [
       "./extensions/index.ts"
     ]
-  },
-  "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",
