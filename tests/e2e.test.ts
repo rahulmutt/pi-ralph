@@ -27,7 +27,7 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, mkdir, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -232,8 +232,8 @@ describe("pi-ralph extension – /ralph command", () => {
 			// /ralph 2 prompt.md  (2 iterations, path relative to cwd)
 			await getSession().prompt("/ralph 2 prompt.md");
 
-			// ── RALPH.md assertions ──────────────────────────────────────────
-			const ralphPath = join(cwd, "RALPH.md");
+			// ── .ralph/RALPH.md assertions ──────────────────────────────────
+			const ralphPath = join(cwd, ".ralph", "RALPH.md");
 			const ralphContent = await readFile(ralphPath, "utf8");
 
 			// File must contain the section header
@@ -247,6 +247,55 @@ describe("pi-ralph extension – /ralph command", () => {
 
 			// Last emitted message from the final iteration must appear
 			assert.match(ralphContent, new RegExp(iteration2Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+			// ── per-invocation file assertions ───────────────────────────────
+			// There must be exactly one YYYY/MM/DD directory tree under .ralph/,
+			// and that directory must contain exactly one RALPH-HH-MM-SS-mmm.md.
+			const ralphDir = join(cwd, ".ralph");
+			const yearDirs = (await readdir(ralphDir, { withFileTypes: true }))
+				.filter((e) => e.isDirectory())
+				.map((e) => e.name);
+			assert.equal(yearDirs.length, 1, "should have exactly one year directory");
+			const monthDirs = (await readdir(join(ralphDir, yearDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory())
+				.map((e) => e.name);
+			assert.equal(monthDirs.length, 1, "should have exactly one month directory");
+			const dayDirs = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory())
+				.map((e) => e.name);
+			assert.equal(dayDirs.length, 1, "should have exactly one day directory");
+			const invFiles = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!)))
+				.filter((f) => f.startsWith("RALPH-") && f.endsWith(".md"));
+			assert.equal(invFiles.length, 1, "should have exactly one per-invocation file per /ralph call");
+			// The per-invocation file must contain the same final-iteration content.
+			const invContent = await readFile(
+				join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!, invFiles[0]!),
+				"utf8",
+			);
+			assert.match(invContent, /Iteration: 2 of 2/, "per-invocation file should reflect the last iteration");
+			assert.match(
+				invContent,
+				new RegExp(iteration2Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+				"per-invocation file should contain last iteration response",
+			);
+
+			// Per-invocation JSONL: same base name as the .md, .jsonl extension.
+			const jsonlName = invFiles[0]!.replace(/\.md$/, ".jsonl");
+			const jsonlContent = await readFile(
+				join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!, jsonlName),
+				"utf8",
+			);
+			// Every non-empty line must be valid JSON.
+			const jsonlLines = jsonlContent.split("\n").filter((l) => l.trim() !== "");
+			assert.ok(jsonlLines.length > 0, "JSONL file must not be empty");
+			for (const line of jsonlLines) {
+				assert.doesNotThrow(() => JSON.parse(line), `JSONL line must be valid JSON: ${line.slice(0, 80)}`);
+			}
+			// The last response from the faux LLM must appear somewhere in the JSONL.
+			assert.ok(
+				jsonlContent.includes(iteration2Response),
+				"JSONL must contain text from the final iteration's assistant message",
+			);
 
 			// ── notification assertions ──────────────────────────────────────
 			// "Starting" notification
@@ -292,7 +341,7 @@ describe("pi-ralph extension – /ralph command", () => {
 				"should default to 3 iterations",
 			);
 
-			const ralphContent = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const ralphContent = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 			assert.match(ralphContent, /Iteration: 3 of 3/);
 		} finally {
 			await runtime.dispose();
@@ -310,7 +359,7 @@ describe("pi-ralph extension – /ralph command", () => {
 
 			assert.equal(fauxProvider.state.callCount, 1);
 
-			const ralphContent = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const ralphContent = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 			assert.match(ralphContent, /Iteration: 1 of 1/);
 			assert.match(ralphContent, /done in one shot/);
 		} finally {
@@ -333,9 +382,9 @@ describe("pi-ralph extension – /ralph command", () => {
 		try {
 			await getSession().prompt("/ralph 3 msg.md");
 
-			const ralphContent = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const ralphContent = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 			assert.match(ralphContent, new RegExp(lastIterationMsg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-			// Earlier messages must not leak into the final RALPH.md
+			// Earlier messages must not leak into the final .ralph/RALPH.md
 			assert.doesNotMatch(ralphContent, /should not appear/);
 		} finally {
 			await runtime.dispose();
@@ -353,7 +402,7 @@ describe("pi-ralph extension – /ralph command", () => {
 
 		try {
 			await getSession().prompt("/ralph 2 ts.md");
-			const content = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const content = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 			// ISO-8601 timestamp must be present
 			assert.match(content, /Updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 		} finally {
@@ -418,11 +467,11 @@ describe("pi-ralph extension – /ralph command", () => {
 			);
 			assert.ok(error, "should emit a file-read-error notification");
 
-			// Must NOT have written RALPH.md
+			// Must NOT have written .ralph/RALPH.md
 			await assert.rejects(
-				() => readFile(join(cwd, "RALPH.md"), "utf8"),
+				() => readFile(join(cwd, ".ralph", "RALPH.md"), "utf8"),
 				{ code: "ENOENT" },
-				"RALPH.md must not be created when the prompt file is missing",
+				".ralph/RALPH.md must not be created when the prompt file is missing",
 			);
 		} finally {
 			await runtime.dispose();
@@ -526,7 +575,7 @@ describe("pi-ralph extension – /ralph command", () => {
 		try {
 			await getSession().prompt("/ralph 1 fmt.md");
 
-			const content = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const content = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 
 			// Required structural elements
 			assert.match(content, /^# RALPH\s*$/m, "must have '# RALPH' header");
@@ -552,9 +601,103 @@ describe("pi-ralph extension – /ralph command", () => {
 		try {
 			await getSession().prompt("/ralph 1 fence.md");
 
-			const content = await readFile(join(cwd, "RALPH.md"), "utf8");
+			const content = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
 			// The raw ``` inside the response must be escaped so the file is valid
 			assert.match(content, /``\\`/, "triple-backtick should be escaped as ``\\`");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	// ── JSONL session-history tests ───────────────────────────────────────────
+
+	it("writes a valid JSONL file alongside the per-invocation .md", { timeout: 30_000 }, async () => {
+		await writeFile(join(cwd, "history.md"), "session history test");
+
+		const { runtime, fauxProvider, getSession } = await createTestRuntime(cwd, sessionDir);
+		const assistantResponse = "session history assistant reply – marker a1b2";
+		fauxProvider.setResponses([fauxAssistantMessage(assistantResponse)]);
+
+		try {
+			await getSession().prompt("/ralph 1 history.md");
+
+			// Navigate to the per-invocation day directory.
+			const ralphDir = join(cwd, ".ralph");
+			const yearDirs = (await readdir(ralphDir, { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const monthDirs = (await readdir(join(ralphDir, yearDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const dayDirs = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const dayDir = join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!);
+
+			// There should be exactly one .md and one .jsonl, sharing the same base name.
+			const files = await readdir(dayDir);
+			const mdFiles = files.filter((f) => f.endsWith(".md"));
+			const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+			assert.equal(mdFiles.length, 1, "should have exactly one .md file");
+			assert.equal(jsonlFiles.length, 1, "should have exactly one .jsonl file");
+			assert.equal(
+				mdFiles[0]!.replace(/\.md$/, ""),
+				jsonlFiles[0]!.replace(/\.jsonl$/, ""),
+				".md and .jsonl must share the same base name",
+			);
+
+			// Every line in the JSONL must be valid JSON.
+			const jsonlContent = await readFile(join(dayDir, jsonlFiles[0]!), "utf8");
+			const lines = jsonlContent.split("\n").filter((l) => l.trim() !== "");
+			assert.ok(lines.length > 0, "JSONL must contain at least one line");
+			const parsed = lines.map((l, idx) => {
+				try {
+					return JSON.parse(l) as unknown;
+				} catch {
+					assert.fail(`JSONL line ${idx + 1} is not valid JSON: ${l.slice(0, 120)}`);
+				}
+			});
+
+			// At least one message should have role "user" and one role "assistant".
+			const roles = parsed.map((m) => (m as Record<string, unknown>).role);
+			assert.ok(roles.includes("user"), "JSONL must include a user message");
+			assert.ok(roles.includes("assistant"), "JSONL must include an assistant message");
+
+			// The assistant response text must appear in the JSONL.
+			assert.ok(
+				jsonlContent.includes(assistantResponse),
+				"JSONL must contain the assistant response text",
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("JSONL is overwritten each iteration and reflects the latest transcript", { timeout: 30_000 }, async () => {
+		await writeFile(join(cwd, "multi.md"), "multi-iteration history test");
+
+		const { runtime, fauxProvider, getSession } = await createTestRuntime(cwd, sessionDir);
+		const lastResponse = "final iteration reply – unique z9q8";
+		fauxProvider.setResponses([
+			fauxAssistantMessage("first iteration reply – should not be in final JSONL"),
+			fauxAssistantMessage(lastResponse),
+		]);
+
+		try {
+			await getSession().prompt("/ralph 2 multi.md");
+
+			const ralphDir = join(cwd, ".ralph");
+			const yearDirs = (await readdir(ralphDir, { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const monthDirs = (await readdir(join(ralphDir, yearDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const dayDirs = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!), { withFileTypes: true }))
+				.filter((e) => e.isDirectory()).map((e) => e.name);
+			const dayDir = join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!);
+
+			const jsonlFiles = (await readdir(dayDir)).filter((f) => f.endsWith(".jsonl"));
+			assert.equal(jsonlFiles.length, 1, "should have exactly one .jsonl for one /ralph call");
+
+			const jsonlContent = await readFile(join(dayDir, jsonlFiles[0]!), "utf8");
+			// Final iteration response must be present.
+			assert.ok(jsonlContent.includes(lastResponse), "JSONL must reflect the last iteration's transcript");
 		} finally {
 			await runtime.dispose();
 		}

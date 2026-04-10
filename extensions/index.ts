@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentEndEvent, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -116,15 +116,13 @@ function escapeCodeFence(text: string): string {
 	return text.replace(/```/g, "``\\`");
 }
 
-async function writeRalphStateFile(
-	cwd: string,
+function buildRalphContent(
 	promptPath: string,
 	iteration: number,
 	totalIterations: number,
 	lastMessage: string,
-): Promise<void> {
-	const ralphPath = path.join(cwd, "RALPH.md");
-	const content = [
+): string {
+	return [
 		"# RALPH",
 		"",
 		`- Iteration: ${iteration} of ${totalIterations}`,
@@ -138,22 +136,78 @@ async function writeRalphStateFile(
 		"```",
 		"",
 	].join("\n");
+}
 
-	await fs.writeFile(ralphPath, content, "utf8");
+/** Returns the path to the .ralph directory for a given cwd. */
+function getRalphDir(cwd: string): string {
+	return path.join(cwd, ".ralph");
+}
+
+/**
+ * Build the per-invocation file path inside the .ralph directory.
+ * Layout: .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>.md
+ *
+ * The timestamp is fixed once per /ralph invocation so every iteration
+ * of the same run writes to the same per-invocation file.
+ */
+function buildInvocationPath(ralphDir: string, ts: Date): string {
+	const y = ts.getFullYear().toString();
+	const mo = String(ts.getMonth() + 1).padStart(2, "0");
+	const d = String(ts.getDate()).padStart(2, "0");
+	const h = String(ts.getHours()).padStart(2, "0");
+	const mi = String(ts.getMinutes()).padStart(2, "0");
+	const s = String(ts.getSeconds()).padStart(2, "0");
+	const ms = String(ts.getMilliseconds()).padStart(3, "0");
+	return path.join(ralphDir, y, mo, d, `RALPH-${h}-${mi}-${s}-${ms}.md`);
+}
+
+async function writeRalphStateFile(
+	cwd: string,
+	invocationTimestamp: Date,
+	promptPath: string,
+	iteration: number,
+	totalIterations: number,
+	lastMessage: string,
+	messages: AgentEndEvent["messages"],
+): Promise<void> {
+	const content = buildRalphContent(promptPath, iteration, totalIterations, lastMessage);
+	const ralphDir = getRalphDir(cwd);
+
+	// Always-current summary: .ralph/RALPH.md (overwritten each iteration)
+	await fs.mkdir(ralphDir, { recursive: true });
+	await fs.writeFile(path.join(ralphDir, "RALPH.md"), content, "utf8");
+
+	// Per-invocation log: .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>.md
+	const invocationPath = buildInvocationPath(ralphDir, invocationTimestamp);
+	await fs.mkdir(path.dirname(invocationPath), { recursive: true });
+	await fs.writeFile(invocationPath, content, "utf8");
+
+	// Session history JSONL: one AgentMessage per line, alongside the .md file.
+	// Overwritten each iteration so the file always reflects the latest transcript.
+	const jsonlPath = invocationPath.slice(0, -".md".length) + ".jsonl";
+	const jsonlContent = messages.map((msg) => JSON.stringify(msg)).join("\n") + "\n";
+	await fs.writeFile(jsonlPath, jsonlContent, "utf8");
 }
 
 export default function ralph(pi: ExtensionAPI) {
+	/** Result delivered from agent_end to the waiting iteration handler. */
+	interface IterationResult {
+		lastMessage: string;
+		/** Full conversation transcript for this agent run, in message order. */
+		messages: AgentEndEvent["messages"];
+	}
+
 	// Used by /ralph to coordinate with agent_end events.
 	// Set to a resolver just before pi.sendUserMessage is called each iteration;
 	// cleared and resolved once agent_end fires.
-	let ralphAgentDoneResolve: ((lastMessage: string) => void) | null = null;
+	let ralphAgentDoneResolve: ((result: IterationResult) => void) | null = null;
 
 	pi.on("agent_end", async (event, _ctx) => {
 		if (!ralphAgentDoneResolve) return;
 
 		// Extract the last assistant text from this agent run's messages.
 		let lastMsg = "";
-		const msgs = (event as unknown as { messages?: unknown[] }).messages ?? [];
+		const msgs = event.messages;
 		for (let i = msgs.length - 1; i >= 0; i--) {
 			const msg = msgs[i] as { role?: string; content?: unknown } | undefined;
 			if (msg?.role === "assistant") {
@@ -167,7 +221,7 @@ export default function ralph(pi: ExtensionAPI) {
 
 		const resolve = ralphAgentDoneResolve;
 		ralphAgentDoneResolve = null;
-		resolve(lastMsg);
+		resolve({ lastMessage: lastMsg, messages: msgs });
 	});
 
 	pi.registerCommand("ralph", {
@@ -210,6 +264,10 @@ export default function ralph(pi: ExtensionAPI) {
 			try {
 				await ctx.waitForIdle();
 
+				// Timestamp fixed once per invocation; all iterations of this run share
+				// the same per-invocation file path derived from this value.
+				const invocationTimestamp = new Date();
+
 				// Capture the original session once so every iteration branches from
 				// the same clean parent, regardless of ctx.sessionManager staleness
 				// after the first ctx.newSession() call.
@@ -239,8 +297,8 @@ export default function ralph(pi: ExtensionAPI) {
 					// completes and gives us the last assistant message directly.
 					pi.sendUserMessage(trimmedPrompt);
 
-					const lastMessage = await agentDone;
-					await writeRalphStateFile(ctx.cwd, resolvedPromptPath, i, parsed.iterations, lastMessage);
+					const { lastMessage, messages } = await agentDone;
+					await writeRalphStateFile(ctx.cwd, invocationTimestamp, resolvedPromptPath, i, parsed.iterations, lastMessage, messages);
 					ctx.ui.notify(`Ralph iteration ${i}/${parsed.iterations} complete`, "info");
 				}
 			} finally {
