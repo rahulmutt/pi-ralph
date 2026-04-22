@@ -151,12 +151,21 @@ interface RalphState {
 	 * Set before ctx.newSession(); consumed (and cleared) by the session_start handler.
 	 */
 	pending: string | null;
+	/** True while a /ralph loop is actively running. */
+	running: boolean;
+	/** Set by /ralph stop and consumed between iterations. */
+	stopRequested: boolean;
 }
 
 function getRalphState(): RalphState {
 	const g = globalThis as Record<symbol, unknown>;
 	if (!g[RALPH_STATE_KEY]) {
-		g[RALPH_STATE_KEY] = { resolve: null, pending: null } satisfies RalphState;
+		g[RALPH_STATE_KEY] = {
+			resolve: null,
+			pending: null,
+			running: false,
+			stopRequested: false,
+		} satisfies RalphState;
 	}
 	return g[RALPH_STATE_KEY] as RalphState;
 }
@@ -322,12 +331,31 @@ export default function ralph(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("ralph", {
-		description: "Run a Ralph Wiggum loop with an optional iteration count and prompt file",
+		description: "Run a Ralph Wiggum loop with an optional iteration count and prompt file, or stop after the current iteration with /ralph stop",
 		handler: async (args, ctx) => {
+			if (args.trim() === "stop") {
+				const state = getRalphState();
+				if (!state.running) {
+					ctx.ui.notify("No Ralph Wiggum loop is currently running", "warning");
+					return;
+				}
+				state.stopRequested = true;
+				ctx.ui.notify("Ralph Wiggum loop will stop after the current iteration completes", "info");
+				return;
+			}
+
 			const parsed = parseRalphArgs(args);
 			if (parsed.error || !parsed.promptPath) {
 				ctx.ui.notify(parsed.error ?? "Usage: /ralph [iterations] <prompt-file>", "warning");
 				return;
+			}
+
+			{
+				const state = getRalphState();
+				if (state.running) {
+					ctx.ui.notify("A Ralph Wiggum loop is already running", "warning");
+					return;
+				}
 			}
 
 			if (!canReadPath(parsed.promptPath, ctx.cwd)) {
@@ -353,10 +381,23 @@ export default function ralph(pi: ExtensionAPI) {
 				return;
 			}
 
+			{
+				const state = getRalphState();
+				if (state.running) {
+					ctx.ui.notify("A Ralph Wiggum loop is already running", "warning");
+					return;
+				}
+				state.running = true;
+				state.stopRequested = false;
+			}
+
 			ctx.ui.notify(
 				`Starting Ralph Wiggum loop: ${parsed.iterations} iteration${parsed.iterations === 1 ? "" : "s"}`,
 				"info",
 			);
+
+			let completedIterations = 0;
+			let stoppedEarly = false;
 
 			try {
 				await ctx.waitForIdle();
@@ -412,13 +453,36 @@ export default function ralph(pi: ExtensionAPI) {
 						iterationSummaries,
 						messages,
 					);
+					completedIterations = i;
 					ctx.ui.notify(`Ralph iteration ${i}/${parsed.iterations} complete`, "info");
+
+					if (i < parsed.iterations) {
+						const state = getRalphState();
+						if (state.stopRequested) {
+							stoppedEarly = true;
+							ctx.ui.notify(
+								`Ralph Wiggum loop stopping after iteration ${i}/${parsed.iterations}`,
+								"info",
+							);
+							break;
+						}
+					}
 				}
 			} finally {
 				const state = getRalphState();
 				state.resolve = null;
 				state.pending = null;
+				state.running = false;
+				state.stopRequested = false;
 				ctx.ui.setStatus("ralph", "");
+			}
+
+			if (stoppedEarly) {
+				ctx.ui.notify(
+					`Ralph Wiggum loop stopped after ${completedIterations} of ${parsed.iterations} iteration${parsed.iterations === 1 ? "" : "s"}`,
+					"success",
+				);
+				return;
 			}
 
 			ctx.ui.notify(

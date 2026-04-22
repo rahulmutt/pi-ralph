@@ -50,6 +50,7 @@ import {
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const EXTENSION_PATH = resolve("/workspace/extensions/index.ts");
+const RALPH_STATE_KEY = Symbol.for("@rahulmutt/pi-ralph.state");
 // An isolated agent dir so tests never read ~/.pi
 const AGENT_DIR = join(tmpdir(), "pi-ralph-test-agent");
 
@@ -58,6 +59,16 @@ const AGENT_DIR = join(tmpdir(), "pi-ralph-test-agent");
 interface Notification {
 	message: string;
 	type?: "info" | "warning" | "error" | "success";
+}
+
+function resetRalphState() {
+	const g = globalThis as Record<symbol, unknown>;
+	g[RALPH_STATE_KEY] = {
+		resolve: null,
+		pending: null,
+		running: false,
+		stopRequested: false,
+	};
 }
 
 function makeMockUIContext(notifications: Notification[]): ExtensionUIContext {
@@ -84,7 +95,11 @@ function makeMockUIContext(notifications: Notification[]): ExtensionUIContext {
  * the extension's `pi` API is correctly redirected to each new session (see
  * design note above).
  */
-async function createTestRuntime(cwd: string, sessionDir: string) {
+async function createTestRuntime(
+	cwd: string,
+	sessionDir: string,
+	fauxOptions?: Parameters<typeof registerFauxProvider>[0],
+) {
 	await mkdir(AGENT_DIR, { recursive: true });
 
 	// Create the shared services once – the same resourceLoader instance is
@@ -110,7 +125,7 @@ async function createTestRuntime(cwd: string, sessionDir: string) {
 	// closes over the latest session reference.
 	let currentSession: AgentSession = undefined!;
 
-	const fauxProvider = registerFauxProvider();
+	const fauxProvider = registerFauxProvider(fauxOptions);
 
 	// The model-registry auth-check requires some credentials for every provider.
 	// Set a dummy runtime key so hasConfiguredAuth(fauxModel) returns true;
@@ -180,7 +195,19 @@ async function createTestRuntime(cwd: string, sessionDir: string) {
 
 	await rebindSession();
 
-	return { runtime, fauxProvider, notifications, getSession: () => currentSession };
+	async function createSiblingSession() {
+		const result = await runtime.newSession();
+		if (!result.cancelled) await rebindSession();
+		return { cancelled: result.cancelled, session: currentSession };
+	}
+
+	return {
+		runtime,
+		fauxProvider,
+		notifications,
+		getSession: () => currentSession,
+		createSiblingSession,
+	};
 }
 
 // ─── test suite ──────────────────────────────────────────────────────────────
@@ -195,11 +222,13 @@ describe("pi-ralph extension – /ralph command", () => {
 	const originalCwd = process.cwd();
 
 	beforeEach(async () => {
+		resetRalphState();
 		cwd = await mkdtemp(join(tmpdir(), "ralph-cwd-"));
 		sessionDir = await mkdtemp(join(tmpdir(), "ralph-sessions-"));
 	});
 
 	afterEach(async () => {
+		resetRalphState();
 		// Restore the process CWD to a directory that will still exist, then
 		// delete the per-test temp dirs so the next test starts clean.
 		try { process.chdir(originalCwd); } catch { /* ignore if already gone */ }
@@ -479,6 +508,68 @@ describe("pi-ralph extension – /ralph command", () => {
 
 			const warning = notifications.find((n) => n.message.toLowerCase().includes("usage"));
 			assert.ok(warning, "should emit a usage warning");
+			assert.equal(warning.type, "warning");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("stops after the current running iteration when /ralph stop is issued", { timeout: 30_000 }, async () => {
+		await writeFile(join(cwd, "stop.md"), "stop test");
+
+		const { runtime, fauxProvider, notifications, getSession } = await createTestRuntime(
+			cwd,
+			sessionDir,
+			{ tokensPerSecond: 20 },
+		);
+		const stopSessionDir = await mkdtemp(join(tmpdir(), "ralph-stop-sessions-"));
+		const { runtime: stopRuntime, notifications: stopNotifications, getSession: getStopSession } = await createTestRuntime(
+			cwd,
+			stopSessionDir,
+		);
+		const slowFirstResponse = "slow first iteration response ".repeat(10);
+		fauxProvider.setResponses([
+			fauxAssistantMessage(slowFirstResponse),
+			fauxAssistantMessage("second iteration should never run"),
+			fauxAssistantMessage("third iteration should never run"),
+		]);
+
+		try {
+			const loopPromise = getSession().prompt("/ralph 3 stop.md");
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			await getStopSession().prompt("/ralph stop");
+			await loopPromise;
+
+			assert.equal(fauxProvider.state.callCount, 1, "should finish the current iteration only");
+
+			const allNotifications = [...notifications, ...stopNotifications];
+			const stopRequested = allNotifications.find((n) =>
+				n.message.includes("will stop after the current iteration completes"),
+			);
+			assert.ok(stopRequested, "should notify that stop was requested");
+
+			const stopped = allNotifications.find((n) => n.message.includes("Ralph Wiggum loop stopped after 1 of 3 iterations"));
+			assert.ok(stopped, "should notify that the loop stopped early");
+			assert.equal(stopped.type, "success");
+
+			const ralphContent = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
+			assert.match(ralphContent, /Iteration: 1 of 3/);
+			assert.ok(!ralphContent.includes("second iteration should never run"));
+		} finally {
+			await stopRuntime.dispose();
+			await runtime.dispose();
+			await rm(stopSessionDir, { recursive: true, force: true });
+		}
+	});
+
+	it("warns when /ralph stop is issued without an active loop", { timeout: 30_000 }, async () => {
+		const { runtime, notifications, getSession } = await createTestRuntime(cwd, sessionDir);
+
+		try {
+			await getSession().prompt("/ralph stop");
+
+			const warning = notifications.find((n) => n.message.includes("No Ralph Wiggum loop is currently running"));
+			assert.ok(warning, "should warn when nothing is running");
 			assert.equal(warning.type, "warning");
 		} finally {
 			await runtime.dispose();

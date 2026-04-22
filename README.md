@@ -19,6 +19,7 @@ pi -e npm:@rahulmutt/pi-ralph
 ```text
 /ralph <prompt-file>
 /ralph [iterations] <prompt-file>
+/ralph stop
 ```
 
 ### Examples
@@ -27,11 +28,13 @@ pi -e npm:@rahulmutt/pi-ralph
 /ralph prompts/implement.md
 /ralph 5 prompts/implement.md
 /ralph 2 "prompts/my prompt.md"
+/ralph stop
 ```
 
 ### Behavior
 
 - **iterations** is optional and defaults to `3` (max `1000`)
+- `/ralph stop` requests a graceful stop: the current iteration is allowed to finish, and the loop exits before starting the next iteration
 - Each iteration starts in a **fresh session** branched from the original, so context is cleared before the prompt runs
 - Progress is persisted under `.ralph/`:
   - `.ralph/RALPH.md` is the always-current summary
