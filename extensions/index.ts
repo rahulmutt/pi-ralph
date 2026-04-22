@@ -208,6 +208,15 @@ function getRalphDir(cwd: string): string {
 	return path.join(cwd, ".ralph");
 }
 
+function buildLoopStatus(
+	iteration: number,
+	totalIterations: number,
+	promptPath: string,
+	phase: "resetting session" | "running prompt",
+): string {
+	return `Ralph Wiggum loop ${iteration}/${totalIterations}: ${phase} (${promptPath})`;
+}
+
 interface InvocationPaths {
 	directory: string;
 	prefix: string;
@@ -413,7 +422,10 @@ export default function ralph(pi: ExtensionAPI) {
 				const iterationSummaries: IterationSummary[] = [];
 
 				for (let i = 1; i <= parsed.iterations; i++) {
-					ctx.ui.setStatus("ralph", `Ralph Wiggum loop ${i}/${parsed.iterations}: resetting session`);
+					ctx.ui.setStatus(
+						"ralph",
+						buildLoopStatus(i, parsed.iterations, resolvedPromptPath, "resetting session"),
+					);
 
 					// Set up agentDone and store the resolve in global state BEFORE
 					// calling ctx.newSession().  ctx.newSession() fires session_start
@@ -437,7 +449,10 @@ export default function ralph(pi: ExtensionAPI) {
 						return;
 					}
 
-					ctx.ui.setStatus("ralph", `Ralph Wiggum loop ${i}/${parsed.iterations}: running prompt`);
+					ctx.ui.setStatus(
+						"ralph",
+						buildLoopStatus(i, parsed.iterations, resolvedPromptPath, "running prompt"),
+					);
 
 					// agentDone is resolved by the agent_end handler above.
 					// The message was already sent to the new session inside the

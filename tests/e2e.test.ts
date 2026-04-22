@@ -61,6 +61,11 @@ interface Notification {
 	type?: "info" | "warning" | "error" | "success";
 }
 
+interface StatusUpdate {
+	key: string;
+	message: string;
+}
+
 function resetRalphState() {
 	const g = globalThis as Record<symbol, unknown>;
 	g[RALPH_STATE_KEY] = {
@@ -71,7 +76,7 @@ function resetRalphState() {
 	};
 }
 
-function makeMockUIContext(notifications: Notification[]): ExtensionUIContext {
+function makeMockUIContext(notifications: Notification[], statuses: StatusUpdate[]): ExtensionUIContext {
 	return {
 		select: async () => undefined,
 		confirm: async () => false,
@@ -80,7 +85,9 @@ function makeMockUIContext(notifications: Notification[]): ExtensionUIContext {
 			notifications.push({ message, type });
 		},
 		onTerminalInput: () => () => {},
-		setStatus: () => {},
+		setStatus(key, message) {
+			statuses.push({ key, message });
+		},
 		setWorkingMessage: () => {},
 		setHiddenThinkingLabel: () => {},
 		setWidget: () => {},
@@ -119,7 +126,8 @@ async function createTestRuntime(
 
 	// Collect notifications emitted by the extension.
 	const notifications: Notification[] = [];
-	const mockUI = makeMockUIContext(notifications);
+	const statuses: StatusUpdate[] = [];
+	const mockUI = makeMockUIContext(notifications, statuses);
 
 	// The variable is mutated by rebindSession() so command context always
 	// closes over the latest session reference.
@@ -205,6 +213,7 @@ async function createTestRuntime(
 		runtime,
 		fauxProvider,
 		notifications,
+		statuses,
 		getSession: () => currentSession,
 		createSiblingSession,
 	};
@@ -243,7 +252,7 @@ describe("pi-ralph extension – /ralph command", () => {
 		const promptFile = join(cwd, "prompt.md");
 		await writeFile(promptFile, promptContent);
 
-		const { runtime, fauxProvider, notifications, getSession } = await createTestRuntime(
+		const { runtime, fauxProvider, notifications, statuses, getSession } = await createTestRuntime(
 			cwd,
 			sessionDir,
 		);
@@ -362,6 +371,24 @@ describe("pi-ralph extension – /ralph command", () => {
 			const done = notifications.find((n) => n.message.includes("Ralph Wiggum loop complete"));
 			assert.ok(done, "should emit a loop-complete notification");
 			assert.equal(done.type, "success");
+
+			// Status messages should include the prompt file path while iterating.
+			assert.ok(
+				statuses.some((s) =>
+					s.key === "ralph" &&
+					s.message.includes("resetting session") &&
+					s.message.includes(promptFile),
+				),
+				"resetting-session status should include the prompt file path",
+			);
+			assert.ok(
+				statuses.some((s) =>
+					s.key === "ralph" &&
+					s.message.includes("running prompt") &&
+					s.message.includes(promptFile),
+				),
+				"running-prompt status should include the prompt file path",
+			);
 
 			// ── faux provider call count ─────────────────────────────────────
 			assert.equal(fauxProvider.state.callCount, 2, "faux LLM should have been called exactly 2 times");
