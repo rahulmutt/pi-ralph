@@ -1,6 +1,6 @@
 {
   "name": "pi-ralph",
-  "image": "ghcr.io/rahulmutt/dev:sha-45d631e",
+  "image": "ghcr.io/rahulmutt/dev:sha-d294056",
   "workspaceFolder": "/workspace",
   "remoteUser": "dev",
   "mounts": [
