@@ -245,8 +245,13 @@ describe("pi-ralph extension – /ralph command", () => {
 			// Prompt file path must be recorded
 			assert.match(ralphContent, /prompt\.md/);
 
-			// Last emitted message from the final iteration must appear
+			// Messages from every iteration must appear so progression is visible.
+			assert.match(ralphContent, new RegExp(iteration1Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			assert.match(ralphContent, new RegExp(iteration2Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.ok(
+				ralphContent.indexOf(iteration1Response) < ralphContent.indexOf(iteration2Response),
+				"iteration messages should appear in order",
+			);
 
 			// ── per-invocation file assertions ───────────────────────────────
 			// There must be exactly one YYYY/MM/DD directory tree under .ralph/,
@@ -267,7 +272,7 @@ describe("pi-ralph extension – /ralph command", () => {
 			const invFiles = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!)))
 				.filter((f) => f.startsWith("RALPH-") && f.endsWith(".md"));
 			assert.equal(invFiles.length, 1, "should have exactly one per-invocation file per /ralph call");
-			// The per-invocation file must contain the same final-iteration content.
+			// The per-invocation file must contain the same accumulated iteration history.
 			const invContent = await readFile(
 				join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!, invFiles[0]!),
 				"utf8",
@@ -275,14 +280,31 @@ describe("pi-ralph extension – /ralph command", () => {
 			assert.match(invContent, /Iteration: 2 of 2/, "per-invocation file should reflect the last iteration");
 			assert.match(
 				invContent,
+				new RegExp(iteration1Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+				"per-invocation file should contain first iteration response",
+			);
+			assert.match(
+				invContent,
 				new RegExp(iteration2Response.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
 				"per-invocation file should contain last iteration response",
 			);
 
-			// Per-invocation JSONL: same base name as the .md, .jsonl extension.
-			const jsonlName = invFiles[0]!.replace(/\.md$/, ".jsonl");
+			// Per-invocation JSONL: one file per iteration, all sharing the same prefix.
+			const jsonlFiles = (await readdir(join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!)))
+				.filter((f) => f.startsWith("RALPH-") && f.endsWith(".jsonl"))
+				.sort();
+			assert.equal(jsonlFiles.length, 2, "should write one per-iteration JSONL file");
+			const sharedPrefix = invFiles[0]!.replace(/\.md$/, "");
+			assert.deepEqual(
+				jsonlFiles,
+				[
+					`${sharedPrefix}-iter-001.jsonl`,
+					`${sharedPrefix}-iter-002.jsonl`,
+				],
+				"JSONL files should share the invocation prefix and include the iteration number",
+			);
 			const jsonlContent = await readFile(
-				join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!, jsonlName),
+				join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!, jsonlFiles[1]!),
 				"utf8",
 			);
 			// Every non-empty line must be valid JSON.
@@ -291,10 +313,10 @@ describe("pi-ralph extension – /ralph command", () => {
 			for (const line of jsonlLines) {
 				assert.doesNotThrow(() => JSON.parse(line), `JSONL line must be valid JSON: ${line.slice(0, 80)}`);
 			}
-			// The last response from the faux LLM must appear somewhere in the JSONL.
+			// The last response from the faux LLM must appear somewhere in the final iteration JSONL.
 			assert.ok(
 				jsonlContent.includes(iteration2Response),
-				"JSONL must contain text from the final iteration's assistant message",
+				"final iteration JSONL must contain text from the final iteration's assistant message",
 			);
 
 			// ── notification assertions ──────────────────────────────────────
@@ -367,15 +389,17 @@ describe("pi-ralph extension – /ralph command", () => {
 		}
 	});
 
-	it("RALPH.md records the last message from each iteration (final iteration wins)", { timeout: 30_000 }, async () => {
+	it("RALPH.md records the last message from each iteration in one file", { timeout: 30_000 }, async () => {
 		await writeFile(join(cwd, "msg.md"), "check messages");
 
 		const { runtime, fauxProvider, getSession } = await createTestRuntime(cwd, sessionDir);
 
+		const firstIterationMsg = "earlier response – iteration 1 marker 13ab";
+		const middleIterationMsg = "middle response – iteration 2 marker 72cd";
 		const lastIterationMsg = "final iteration message – unique marker 9f3a";
 		fauxProvider.setResponses([
-			fauxAssistantMessage("earlier response – should not appear in final RALPH.md"),
-			fauxAssistantMessage("middle response – should not appear in final RALPH.md"),
+			fauxAssistantMessage(firstIterationMsg),
+			fauxAssistantMessage(middleIterationMsg),
 			fauxAssistantMessage(lastIterationMsg),
 		]);
 
@@ -383,9 +407,14 @@ describe("pi-ralph extension – /ralph command", () => {
 			await getSession().prompt("/ralph 3 msg.md");
 
 			const ralphContent = await readFile(join(cwd, ".ralph", "RALPH.md"), "utf8");
+			assert.match(ralphContent, new RegExp(firstIterationMsg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.match(ralphContent, new RegExp(middleIterationMsg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			assert.match(ralphContent, new RegExp(lastIterationMsg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-			// Earlier messages must not leak into the final .ralph/RALPH.md
-			assert.doesNotMatch(ralphContent, /should not appear/);
+			assert.ok(
+				ralphContent.indexOf(firstIterationMsg) < ralphContent.indexOf(middleIterationMsg) &&
+					ralphContent.indexOf(middleIterationMsg) < ralphContent.indexOf(lastIterationMsg),
+				"iteration messages should be appended in iteration order",
+			);
 		} finally {
 			await runtime.dispose();
 		}
@@ -582,7 +611,8 @@ describe("pi-ralph extension – /ralph command", () => {
 			assert.match(content, /^- Iteration:/m, "must have Iteration line");
 			assert.match(content, /^- Prompt file:/m, "must have Prompt file line");
 			assert.match(content, /^- Updated:/m, "must have Updated line");
-			assert.match(content, /^## Last emitted message\s*$/m, "must have last-message section");
+			assert.match(content, /^## Iteration progression\s*$/m, "must have iteration-progression section");
+			assert.match(content, /^### Iteration 1\s*$/m, "must include an iteration subsection");
 			assert.match(content, /```text/, "must use a text code fence");
 		} finally {
 			await runtime.dispose();
@@ -631,16 +661,16 @@ describe("pi-ralph extension – /ralph command", () => {
 				.filter((e) => e.isDirectory()).map((e) => e.name);
 			const dayDir = join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!);
 
-			// There should be exactly one .md and one .jsonl, sharing the same base name.
+			// There should be exactly one .md and one per-iteration .jsonl sharing the same invocation prefix.
 			const files = await readdir(dayDir);
 			const mdFiles = files.filter((f) => f.endsWith(".md"));
 			const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
 			assert.equal(mdFiles.length, 1, "should have exactly one .md file");
-			assert.equal(jsonlFiles.length, 1, "should have exactly one .jsonl file");
+			assert.equal(jsonlFiles.length, 1, "should have exactly one .jsonl file for a single iteration");
 			assert.equal(
-				mdFiles[0]!.replace(/\.md$/, ""),
-				jsonlFiles[0]!.replace(/\.jsonl$/, ""),
-				".md and .jsonl must share the same base name",
+				jsonlFiles[0],
+				`${mdFiles[0]!.replace(/\.md$/, "")}-iter-001.jsonl`,
+				".jsonl name must share the .md invocation prefix and include the iteration number",
 			);
 
 			// Every line in the JSONL must be valid JSON.
@@ -670,7 +700,7 @@ describe("pi-ralph extension – /ralph command", () => {
 		}
 	});
 
-	it("JSONL is overwritten each iteration and reflects the latest transcript", { timeout: 30_000 }, async () => {
+	it("writes one JSONL per iteration with a shared invocation prefix", { timeout: 30_000 }, async () => {
 		await writeFile(join(cwd, "multi.md"), "multi-iteration history test");
 
 		const { runtime, fauxProvider, getSession } = await createTestRuntime(cwd, sessionDir);
@@ -692,12 +722,33 @@ describe("pi-ralph extension – /ralph command", () => {
 				.filter((e) => e.isDirectory()).map((e) => e.name);
 			const dayDir = join(ralphDir, yearDirs[0]!, monthDirs[0]!, dayDirs[0]!);
 
-			const jsonlFiles = (await readdir(dayDir)).filter((f) => f.endsWith(".jsonl"));
-			assert.equal(jsonlFiles.length, 1, "should have exactly one .jsonl for one /ralph call");
+			const jsonlFiles = (await readdir(dayDir)).filter((f) => f.endsWith(".jsonl")).sort();
+			assert.equal(jsonlFiles.length, 2, "should have one .jsonl per iteration for one /ralph call");
+			const sharedPrefix = jsonlFiles[0]!.replace(/-iter-001\.jsonl$/, "");
+			assert.deepEqual(
+				jsonlFiles,
+				[
+					`${sharedPrefix}-iter-001.jsonl`,
+					`${sharedPrefix}-iter-002.jsonl`,
+				],
+				"all per-iteration JSONL files should share the same invocation prefix",
+			);
 
-			const jsonlContent = await readFile(join(dayDir, jsonlFiles[0]!), "utf8");
-			// Final iteration response must be present.
-			assert.ok(jsonlContent.includes(lastResponse), "JSONL must reflect the last iteration's transcript");
+			const firstJsonlContent = await readFile(join(dayDir, jsonlFiles[0]!), "utf8");
+			const secondJsonlContent = await readFile(join(dayDir, jsonlFiles[1]!), "utf8");
+			assert.ok(
+				firstJsonlContent.includes("first iteration reply – should not be in final JSONL"),
+				"first iteration JSONL should preserve the first iteration transcript",
+			);
+			assert.ok(
+				!firstJsonlContent.includes(lastResponse),
+				"first iteration JSONL should not contain later iteration transcript content",
+			);
+			assert.ok(secondJsonlContent.includes(lastResponse), "second iteration JSONL must contain the final iteration transcript");
+			assert.ok(
+				!secondJsonlContent.includes("first iteration reply – should not be in final JSONL"),
+				"second iteration JSONL should only contain the second iteration transcript",
+			);
 		} finally {
 			await runtime.dispose();
 		}

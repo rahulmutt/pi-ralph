@@ -138,6 +138,11 @@ interface IterationResult {
 	messages: AgentEndEvent["messages"];
 }
 
+interface IterationSummary {
+	iteration: number;
+	lastMessage: string;
+}
+
 interface RalphState {
 	/** Resolve for the current iteration's agentDone promise, or null when idle. */
 	resolve: ((result: IterationResult) => void) | null;
@@ -164,22 +169,29 @@ function buildRalphContent(
 	promptPath: string,
 	iteration: number,
 	totalIterations: number,
-	lastMessage: string,
+	iterationSummaries: IterationSummary[],
 ): string {
-	return [
+	const sections = [
 		"# RALPH",
 		"",
 		`- Iteration: ${iteration} of ${totalIterations}`,
 		`- Prompt file: ${promptPath}`,
 		`- Updated: ${new Date().toISOString()}`,
 		"",
-		"## Last emitted message",
+		"## Iteration progression",
 		"",
-		"```text",
-		escapeCodeFence(lastMessage || "No text message captured for this iteration."),
-		"```",
-		"",
-	].join("\n");
+	];
+
+	for (const summary of iterationSummaries) {
+		sections.push(`### Iteration ${summary.iteration}`);
+		sections.push("");
+		sections.push("```text");
+		sections.push(escapeCodeFence(summary.lastMessage || "No text message captured for this iteration."));
+		sections.push("```");
+		sections.push("");
+	}
+
+	return sections.join("\n");
 }
 
 /** Returns the path to the .ralph directory for a given cwd. */
@@ -187,14 +199,22 @@ function getRalphDir(cwd: string): string {
 	return path.join(cwd, ".ralph");
 }
 
+interface InvocationPaths {
+	directory: string;
+	prefix: string;
+	markdownPath: string;
+}
+
 /**
- * Build the per-invocation file path inside the .ralph directory.
- * Layout: .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>.md
+ * Build per-invocation paths inside the .ralph directory.
+ * Layout:
+ *   .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>.md
+ *   .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>-iter-<NNN>.jsonl
  *
- * The timestamp is fixed once per /ralph invocation so every iteration
- * of the same run writes to the same per-invocation file.
+ * The timestamp is fixed once per /ralph invocation so every iteration of the
+ * same run shares the same filename prefix.
  */
-function buildInvocationPath(ralphDir: string, ts: Date): string {
+function buildInvocationPaths(ralphDir: string, ts: Date): InvocationPaths {
 	const y = ts.getFullYear().toString();
 	const mo = String(ts.getMonth() + 1).padStart(2, "0");
 	const d = String(ts.getDate()).padStart(2, "0");
@@ -202,7 +222,13 @@ function buildInvocationPath(ralphDir: string, ts: Date): string {
 	const mi = String(ts.getMinutes()).padStart(2, "0");
 	const s = String(ts.getSeconds()).padStart(2, "0");
 	const ms = String(ts.getMilliseconds()).padStart(3, "0");
-	return path.join(ralphDir, y, mo, d, `RALPH-${h}-${mi}-${s}-${ms}.md`);
+	const directory = path.join(ralphDir, y, mo, d);
+	const prefix = `RALPH-${h}-${mi}-${s}-${ms}`;
+	return {
+		directory,
+		prefix,
+		markdownPath: path.join(directory, `${prefix}.md`),
+	};
 }
 
 async function writeRalphStateFile(
@@ -211,24 +237,28 @@ async function writeRalphStateFile(
 	promptPath: string,
 	iteration: number,
 	totalIterations: number,
-	lastMessage: string,
+	iterationSummaries: IterationSummary[],
 	messages: AgentEndEvent["messages"],
 ): Promise<void> {
-	const content = buildRalphContent(promptPath, iteration, totalIterations, lastMessage);
+	const content = buildRalphContent(promptPath, iteration, totalIterations, iterationSummaries);
 	const ralphDir = getRalphDir(cwd);
+	const invocationPaths = buildInvocationPaths(ralphDir, invocationTimestamp);
 
 	// Always-current summary: .ralph/RALPH.md (overwritten each iteration)
 	await fs.mkdir(ralphDir, { recursive: true });
 	await fs.writeFile(path.join(ralphDir, "RALPH.md"), content, "utf8");
 
 	// Per-invocation log: .ralph/<YYYY>/<MM>/<DD>/RALPH-<HH>-<MM>-<SS>-<mmm>.md
-	const invocationPath = buildInvocationPath(ralphDir, invocationTimestamp);
-	await fs.mkdir(path.dirname(invocationPath), { recursive: true });
-	await fs.writeFile(invocationPath, content, "utf8");
+	await fs.mkdir(invocationPaths.directory, { recursive: true });
+	await fs.writeFile(invocationPaths.markdownPath, content, "utf8");
 
-	// Session history JSONL: one AgentMessage per line, alongside the .md file.
-	// Overwritten each iteration so the file always reflects the latest transcript.
-	const jsonlPath = invocationPath.slice(0, -".md".length) + ".jsonl";
+	// Per-iteration session history JSONL: one AgentMessage per line, alongside
+	// the .md file. Each iteration gets its own file while sharing the same
+	// invocation prefix.
+	const jsonlPath = path.join(
+		invocationPaths.directory,
+		`${invocationPaths.prefix}-iter-${String(iteration).padStart(3, "0")}.jsonl`,
+	);
 	const jsonlContent = messages.map((msg) => JSON.stringify(msg)).join("\n") + "\n";
 	await fs.writeFile(jsonlPath, jsonlContent, "utf8");
 }
@@ -339,6 +369,7 @@ export default function ralph(pi: ExtensionAPI) {
 				// the same clean parent, regardless of ctx.sessionManager staleness
 				// after the first ctx.newSession() call.
 				const originalSession = ctx.sessionManager.getSessionFile();
+				const iterationSummaries: IterationSummary[] = [];
 
 				for (let i = 1; i <= parsed.iterations; i++) {
 					ctx.ui.setStatus("ralph", `Ralph Wiggum loop ${i}/${parsed.iterations}: resetting session`);
@@ -371,7 +402,16 @@ export default function ralph(pi: ExtensionAPI) {
 					// The message was already sent to the new session inside the
 					// session_start handler that fired during ctx.newSession().
 					const { lastMessage, messages } = await agentDone;
-					await writeRalphStateFile(ctx.cwd, invocationTimestamp, resolvedPromptPath, i, parsed.iterations, lastMessage, messages);
+					iterationSummaries.push({ iteration: i, lastMessage });
+					await writeRalphStateFile(
+						ctx.cwd,
+						invocationTimestamp,
+						resolvedPromptPath,
+						i,
+						parsed.iterations,
+						iterationSummaries,
+						messages,
+					);
 					ctx.ui.notify(`Ralph iteration ${i}/${parsed.iterations} complete`, "info");
 				}
 			} finally {
